@@ -423,8 +423,12 @@ def is_ready(http_endpoint, ready_endpoint) -> bool:
 @backoff.on_predicate(backoff.expo, max_time=30)
 @multiprocessing_cache(max_calls=100)
 def get_version(http_endpoint, metadata_endpoint="/v1/metadata", version_field="version") -> str:
-    if http_endpoint is None or http_endpoint == "":
+    if (http_endpoint is None) or (http_endpoint == ""):
         return ""
+
+    # TODO: Need a way to match NIM versions to API versions.
+    if "ai.api.nvidia.com" in http_endpoint:
+        return "0.2.0"
 
     url = generate_url(http_endpoint)
     url = remove_url_endpoints(url)
