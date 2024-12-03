@@ -81,7 +81,7 @@ class YoloxModelInterface(ModelInterface):
         else:
             raise ValueError("Invalid protocol specified. Must be 'grpc' or 'http'.")
 
-    def parse_output(self, response, protocol: str):
+    def parse_output(self, response, protocol: str, **kwargs):
         if protocol == 'grpc':
             logger.debug("Parsing output from gRPC Yolox model")
             return response  # For gRPC, response is already a numpy array

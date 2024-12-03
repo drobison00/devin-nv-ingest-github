@@ -33,7 +33,7 @@ class ModelInterface:
     def format_input(self, data, protocol: str):
         raise NotImplementedError("Subclasses should implement this method")
 
-    def parse_output(self, response, protocol: str):
+    def parse_output(self, response, protocol: str, **kwargs):
         raise NotImplementedError("Subclasses should implement this method")
 
     def prepare_data_for_inference(self, data):
@@ -86,7 +86,7 @@ class NimClient:
             raise ValueError("Invalid protocol specified. Must be 'grpc' or 'http'.")
 
         # Parse and process output
-        parsed_output = self.model_interface.parse_output(response, protocol=self.protocol)
+        parsed_output = self.model_interface.parse_output(response, protocol=self.protocol, **kwargs)
         results = self.model_interface.process_inference_results(parsed_output,
                                                                  original_image_shapes=data.get(
                                                                      'original_image_shapes'),

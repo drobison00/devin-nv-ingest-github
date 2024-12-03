@@ -46,7 +46,7 @@ class DeplotModelInterface(ModelInterface):
         else:
             raise ValueError("Invalid protocol specified. Must be 'grpc' or 'http'.")
 
-    def parse_output(self, response, protocol: str):
+    def parse_output(self, response, protocol: str, **kwargs):
         if protocol == 'grpc':
             logger.debug("Parsing output from gRPC Deplot model")
             # Convert bytes output to string

@@ -21,10 +21,8 @@ class PaddleOCRModelInterface(ModelInterface):
     def __init__(
         self,
         paddle_version: Optional[str] = None,
-        table_format: Optional[TableFormatEnum] = TableFormatEnum.PSEUDO_MARKDOWN,
     ):
         self.paddle_version = paddle_version
-        self.table_format = table_format
 
     def prepare_data_for_inference(self, data):
         # Expecting base64_image in data
@@ -37,7 +35,7 @@ class PaddleOCRModelInterface(ModelInterface):
 
         return data
 
-    def format_input(self, data, protocol: str, **kwargs):
+    def format_input(self, data, protocol: str):
         image_data = data["image_array"]
         if protocol == "grpc":
             logger.debug("Formatting input for gRPC PaddleOCR model")
@@ -56,13 +54,15 @@ class PaddleOCRModelInterface(ModelInterface):
         else:
             raise ValueError("Invalid protocol specified. Must be 'grpc' or 'http'.")
 
-    def parse_output(self, response, protocol: str):
+    def parse_output(self, response, protocol: str, **kwargs):
+        table_content_format = kwargs.get("table_content_format", TableFormatEnum.PSEUDO_MARKDOWN)
+
         if protocol == "grpc":
             logger.debug("Parsing output from gRPC PaddleOCR model")
-            return self._extract_content_from_paddle_grpc_response(response)
+            return self._extract_content_from_paddle_grpc_response(response, table_content_format)
         elif protocol == "http":
             logger.debug("Parsing output from HTTP PaddleOCR model")
-            return self._extract_content_from_paddle_http_response(response)
+            return self._extract_content_from_paddle_http_response(response, table_content_format)
         else:
             raise ValueError("Invalid protocol specified. Must be 'grpc' or 'http'.")
 
@@ -88,7 +88,7 @@ class PaddleOCRModelInterface(ModelInterface):
 
         return payload
 
-    def _extract_content_from_paddle_http_response(self, json_response):
+    def _extract_content_from_paddle_http_response(self, json_response, table_content_format):
         if "data" not in json_response or not json_response["data"]:
             raise RuntimeError("Unexpected response format: 'data' key is missing or empty.")
 
@@ -103,16 +103,16 @@ class PaddleOCRModelInterface(ModelInterface):
                 text_predictions.append(text_detection["text_prediction"]["text"])
                 bounding_boxes.append([(point["x"], point["y"]) for point in text_detection["bounding_box"]["points"]])
 
-            if self.table_format == TableFormatEnum.SIMPLE:
+            if table_content_format == TableFormatEnum.SIMPLE:
                 content = " ".join(text_predictions)
-            elif self.table_format == TableFormatEnum.PSEUDO_MARKDOWN:
+            elif table_content_format == TableFormatEnum.PSEUDO_MARKDOWN:
                 content = self._convert_paddle_response_to_psuedo_markdown(bounding_boxes, text_predictions)
             else:
                 raise ValueError(f"Unexpected table format: {self.table_format}")
 
         return content
 
-    def _extract_content_from_paddle_grpc_response(self, response):
+    def _extract_content_from_paddle_grpc_response(self, response, table_content_format):
         # Convert bytes output to string
         if not isinstance(response, np.ndarray):
             raise ValueError("Unexpected response format: response is not a NumPy array.")
@@ -132,9 +132,9 @@ class PaddleOCRModelInterface(ModelInterface):
             bounding_boxes = json.loads(bboxes_bytestr.decode("utf8"))[0]
             text_predictions = json.loads(texts_bytestr.decode("utf8"))[0]
 
-            if self.table_format == TableFormatEnum.SIMPLE:
-                content = " ".join(texts_predictions)
-            elif self.table_format == TableFormatEnum.PSEUDO_MARKDOWN:
+            if table_content_format == TableFormatEnum.SIMPLE:
+                content = " ".join(text_predictions)
+            elif table_content_format == TableFormatEnum.PSEUDO_MARKDOWN:
                 content = self._convert_paddle_response_to_psuedo_markdown(bounding_boxes, text_predictions)
 
         return content
