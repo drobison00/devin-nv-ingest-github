@@ -4,12 +4,20 @@ from nv_ingest.primitives.ingest_control_message import IngestControlMessage, Co
 
 
 def test_empty_control_message():
+    """
+    Validate that an IngestControlMessage with no tasks returns an empty list from get_tasks()
+    and that has_task returns False for any task id.
+    """
     cm = IngestControlMessage()
     assert list(cm.get_tasks()) == []
     assert not cm.has_task("nonexistent")
 
 
 def test_add_single_task():
+    """
+    Validate that adding a single ControlMessageTask stores the task correctly, making it retrievable
+    via has_task and get_tasks.
+    """
     cm = IngestControlMessage()
     task = ControlMessageTask(name="Test Task", id="task1", properties={"key": "value"})
     cm.add_task(task)
@@ -20,6 +28,9 @@ def test_add_single_task():
 
 
 def test_add_duplicate_task():
+    """
+    Validate that adding a duplicate task (same id) raises a ValueError indicating that tasks must be unique.
+    """
     cm = IngestControlMessage()
     task = ControlMessageTask(name="Test Task", id="task1", properties={"key": "value"})
     cm.add_task(task)
@@ -30,6 +41,10 @@ def test_add_duplicate_task():
 
 
 def test_multiple_tasks():
+    """
+    Validate that multiple tasks added to IngestControlMessage are stored and retrievable.
+    Ensures that has_task returns True for all added tasks and that get_tasks returns the correct set of tasks.
+    """
     cm = IngestControlMessage()
     task_data = [
         {"name": "Task A", "id": "a", "properties": {}},

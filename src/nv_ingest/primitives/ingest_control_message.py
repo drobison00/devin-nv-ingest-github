@@ -1,3 +1,7 @@
+import re
+from datetime import datetime
+
+import pandas as pd
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Any, Dict, Generator
 
@@ -12,21 +16,21 @@ class ControlMessageTask(BaseModel):
 
 class IngestControlMessage:
     """
-    A Python-based stub for a control message class that matches the `ControlMessage` interface.
+    A control message class for ingesting tasks and managing associated metadata, timestamps, and payload.
     """
 
-    def __init__(self, message=None):
+    def __init__(self):
         """
-        Initialize the IngestControlMessage.
+        Initialize a new IngestControlMessage instance.
 
         Parameters
         ----------
-        message : Optional[IngestControlMessage or other]
-            An optional argument that could be used to initialize this instance
-            from another control message or Python object.
+        None
         """
-        # We store tasks in an internal dictionary keyed by the task's 'id'.
         self._tasks: Dict[str, ControlMessageTask] = {}
+        self._metadata: Dict[str, Any] = {}
+        self._timestamps: Dict[str, datetime] = {}
+        self._payload: pd.DataFrame = pd.DataFrame()
 
     def add_task(self, task: ControlMessageTask):
         """
@@ -77,6 +81,22 @@ class IngestControlMessage:
         """
         return task_id in self._tasks
 
+    def remove_task(self, task_id: str) -> None:
+        """
+        Remove a task from the control message.
+
+        Parameters
+        ----------
+        task_id : str
+            The unique identifier of the task to remove.
+
+        Returns
+        -------
+        None
+        """
+        if task_id in self._tasks:
+            del self._tasks[task_id]
+
     def config(self, config=None):
         """
         Configure the control message or retrieve its current configuration.
@@ -104,41 +124,84 @@ class IngestControlMessage:
         """
         pass
 
-    def get_metadata(self, key=None, default_value=None):
+    def get_metadata(self, key: str = None, default_value: Any = None) -> Any:
         """
-        Retrieve metadata for a given key. If no key is provided, return all metadata.
+        Retrieve metadata stored in the control message.
 
         Parameters
         ----------
         key : str, optional
-            The key for which we want to retrieve metadata.
+            The metadata key to retrieve. If None, returns a copy of all metadata.
         default_value : Any, optional
-            A default value to return if the key is not found.
+            The value to return if the key is not found.
 
         Returns
         -------
         Any
-            The metadata associated with `key` or a dict of all metadata if `key` is None.
+            The metadata value corresponding to the key, or a copy of all metadata if key is None.
         """
-        pass
+        if key is None:
+            return self._metadata.copy()
+        return self._metadata.get(key, default_value)
 
-    def filter_timestamp(self, regex_filter):
+    def has_metadata(self, key: str) -> bool:
+        """
+        Check if a metadata key exists in the control message.
+
+        Parameters
+        ----------
+        key : str
+            The metadata key to check.
+
+        Returns
+        -------
+        bool
+            True if the key exists, False otherwise.
+        """
+        return key in self._metadata
+
+    def list_metadata(self) -> list:
+        """
+        List all metadata keys in the control message.
+
+        Returns
+        -------
+        list of str
+            A list containing all metadata keys.
+        """
+        return list(self._metadata.keys())
+
+    def set_metadata(self, key: str, value: Any) -> None:
+        """
+        Set a metadata key-value pair in the control message.
+
+        Parameters
+        ----------
+        key : str
+            The metadata key.
+        value : Any
+            The metadata value.
+        """
+        self._metadata[key] = value
+
+    def filter_timestamp(self, regex_filter: str) -> Dict[str, datetime]:
         """
         Retrieve timestamps matching a regex filter.
 
         Parameters
         ----------
         regex_filter : str
-            The regex pattern to match against timestamps.
+            The regex pattern to match against timestamp keys.
 
         Returns
         -------
         dict
             A dictionary of matching timestamp entries.
         """
-        pass
+        pattern = re.compile(regex_filter)
+        return {key: ts for key, ts in self._timestamps.items() if pattern.search(key)}
 
-    def get_timestamp(self, key, fail_if_nonexist=False):
+    def get_timestamp(self, key: str, fail_if_nonexist: bool = False) -> datetime:
         """
         Retrieve a timestamp for a given key.
 
@@ -153,10 +216,19 @@ class IngestControlMessage:
         -------
         datetime or None
             The timestamp if found; otherwise None (or raises an error if fail_if_nonexist is True).
-        """
-        pass
 
-    def get_timestamps(self):
+        Raises
+        ------
+        KeyError
+            If the key does not exist and fail_if_nonexist is True.
+        """
+        if key in self._timestamps:
+            return self._timestamps[key]
+        if fail_if_nonexist:
+            raise KeyError(f"Timestamp for key '{key}' does not exist.")
+        return None
+
+    def get_timestamps(self) -> Dict[str, datetime]:
         """
         Retrieve all timestamps.
 
@@ -165,9 +237,9 @@ class IngestControlMessage:
         dict
             A dictionary of all timestamps stored in this control message.
         """
-        pass
+        return self._timestamps.copy()
 
-    def set_timestamp(self, key, timestamp):
+    def set_timestamp(self, key: str, timestamp: Any) -> None:
         """
         Set a timestamp for a given key.
 
@@ -176,52 +248,52 @@ class IngestControlMessage:
         key : str
             The key to associate with the timestamp.
         timestamp : datetime or str
-            The timestamp to store.
-        """
-        pass
+            The timestamp to store. If a string is provided, it must be in ISO format.
 
-    def has_metadata(self, key):
+        Raises
+        ------
+        ValueError
+            If the provided timestamp is neither a datetime object nor a valid ISO format string.
         """
-        Check if a specific metadata key exists.
+        if isinstance(timestamp, datetime):
+            self._timestamps[key] = timestamp
+        elif isinstance(timestamp, str):
+            try:
+                dt = datetime.fromisoformat(timestamp)
+                self._timestamps[key] = dt
+            except ValueError as e:
+                raise ValueError(f"Invalid timestamp format: {timestamp}") from e
+        else:
+            raise ValueError("timestamp must be a datetime object or ISO format string")
+
+    def payload(self, payload: pd.DataFrame = None) -> pd.DataFrame:
+        """
+        Get or set the payload for this control message.
 
         Parameters
         ----------
-        key : str
-            The key to check for existence.
+        payload : pd.DataFrame, optional
+            A pandas DataFrame to set as the payload. If None, the current payload is returned.
 
         Returns
         -------
-        bool
-            True if the metadata key exists, False otherwise.
-        """
-        pass
+        pd.DataFrame
+            The current payload if payload is None; otherwise, returns the newly set payload.
 
-    def list_metadata(self):
+        Raises
+        ------
+        ValueError
+            If the provided payload is not a pandas DataFrame.
         """
-        List all metadata keys.
+        if payload is None:
+            return self._payload
 
-        Returns
-        -------
-        list
-            A list of all metadata keys in this control message.
-        """
-        pass
+        if not isinstance(payload, pd.DataFrame):
+            raise ValueError("Payload must be a pandas DataFrame")
 
-    def payload(self, meta=None):
-        """
-        Get or set the payload (MessageMeta) for this control message.
+        self._payload = payload
 
-        Parameters
-        ----------
-        meta : Any, optional
-            A Python object or MessageMeta-like object to set as the payload.
-
-        Returns
-        -------
-        Any
-            The current payload if meta is None; otherwise returns nothing.
-        """
-        pass
+        return self._payload
 
     def tensors(self, tensor=None):
         """
@@ -236,45 +308,5 @@ class IngestControlMessage:
         -------
         Any
             The current tensor data if tensor is None; otherwise returns nothing.
-        """
-        pass
-
-    def remove_task(self, task_type):
-        """
-        Remove a task from the control message.
-
-        Parameters
-        ----------
-        task_type : Any
-            The task type to remove.
-        """
-        pass
-
-    def set_metadata(self, key, value):
-        """
-        Set a metadata entry for a given key.
-
-        Parameters
-        ----------
-        key : str
-            The metadata key.
-        value : Any
-            The value to set for this key.
-        """
-        pass
-
-    def task_type(self, task_type=None):
-        """
-        Get or set the primary task type for this control message.
-
-        Parameters
-        ----------
-        task_type : Any, optional
-            If provided, set the control message to this task type.
-
-        Returns
-        -------
-        Any
-            The current task type if called without an argument.
         """
         pass
