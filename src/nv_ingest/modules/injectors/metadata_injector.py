@@ -2,17 +2,14 @@
 # All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-
 import logging
-
 import mrc
 import pandas as pd
-from morpheus.messages import ControlMessage
-from morpheus.messages import MessageMeta
 from morpheus.utils.module_utils import ModuleLoaderFactory
 from morpheus.utils.module_utils import register_module
 
-import cudf
+# Use our IngestControlMessage instead of the Morpheus ControlMessage and MessageMeta.
+from nv_ingest.primitives.ingest_control_message import IngestControlMessage
 
 from nv_ingest.schemas import MetadataInjectorSchema
 from nv_ingest.schemas.ingest_job_schema import DocumentTypeEnum
@@ -30,9 +27,23 @@ MODULE_NAMESPACE = "nv_ingest"
 MetadataInjectorLoaderFactory = ModuleLoaderFactory(MODULE_NAME, MODULE_NAMESPACE)
 
 
-def on_data(message: ControlMessage):
-    with message.payload().mutable_dataframe() as mdf:
-        df = mdf.to_pandas()
+def on_data(message: IngestControlMessage):
+    """
+    Retrieve the payload as a pandas DataFrame, inject metadata into rows that lack it,
+    and update the message payload if modifications were made.
+
+    Parameters
+    ----------
+    message : IngestControlMessage
+        The control message whose payload will be processed.
+
+    Returns
+    -------
+    IngestControlMessage
+        The updated control message.
+    """
+    # Get the payload as a pandas DataFrame
+    df = message.payload()
 
     update_required = False
     rows = []
@@ -56,20 +67,27 @@ def on_data(message: ControlMessage):
                 },
                 "text_metadata": (None if (content_type != ContentTypeEnum.TEXT) else {"text_type": "document"}),
             }
-
         rows.append(row)
 
     if update_required:
         docs = pd.DataFrame(rows)
-        gdf = cudf.from_pandas(docs)
-        message_meta = MessageMeta(df=gdf)
-        message.payload(message_meta)
+        # Directly update the payload with the new pandas DataFrame
+        message.payload(docs)
 
     return message
 
 
 @register_module(MODULE_NAME, MODULE_NAMESPACE)
 def _metadata_injection(builder: mrc.Builder):
+    """
+    A module for injecting metadata into messages. It retrieves the message payload,
+    processes it to ensure required metadata is present, and updates the payload if necessary.
+
+    Parameters
+    ----------
+    builder : mrc.Builder
+        The Morpheus pipeline builder object.
+    """
     validated_config = fetch_and_validate_module_config(builder, MetadataInjectorSchema)
 
     @traceable(MODULE_NAME)
@@ -77,7 +95,7 @@ def _metadata_injection(builder: mrc.Builder):
         annotation_id=MODULE_NAME,
         raise_on_failure=validated_config.raise_on_failure,
     )
-    def _on_data(message: ControlMessage):
+    def _on_data(message: IngestControlMessage):
         return on_data(message)
 
     node = builder.make_node("metadata_injector", _on_data)
