@@ -22,6 +22,7 @@ from nv_ingest.modules.telemetry.otel_meter import OpenTelemetryMeterLoaderFacto
 from nv_ingest.modules.telemetry.otel_tracer import OpenTelemetryTracerLoaderFactory
 from nv_ingest.modules.transforms.embed_extractions import EmbedExtractionsLoaderFactory
 from nv_ingest.modules.transforms.nemo_doc_splitter import NemoDocSplitterLoaderFactory
+from nv_ingest.primitives.ingest_control_message import IngestControlMessage
 from nv_ingest.stages.docx_extractor_stage import generate_docx_extractor_stage
 from nv_ingest.stages.extractors.image_extractor_stage import generate_image_extractor_stage
 from nv_ingest.stages.filters import generate_dedup_stage
@@ -128,7 +129,7 @@ def add_source_stage(pipe, morpheus_pipeline_config, ingest_config):
         LinearModuleSourceStage(
             morpheus_pipeline_config,
             source_module_loader,
-            output_type=ControlMessage,
+            output_type=IngestControlMessage,
             output_port_name="output",
         )
     )

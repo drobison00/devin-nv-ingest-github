@@ -7,15 +7,15 @@ import copy
 import json
 import threading
 
-import cudf
 import mrc
-from morpheus.messages import ControlMessage
-from morpheus.messages import MessageMeta
+import pandas as pd
 from morpheus.utils.module_utils import ModuleLoaderFactory
 from morpheus.utils.module_utils import register_module
 from opentelemetry.trace.span import format_trace_id
 from pydantic import BaseModel
 
+# Register the module
+from nv_ingest.primitives.ingest_control_message import IngestControlMessage, ControlMessageTask
 from nv_ingest.schemas import validate_ingest_job
 from nv_ingest.schemas.message_broker_source_schema import MessageBrokerTaskSourceSchema
 from nv_ingest.util.modules.config_validator import fetch_and_validate_module_config
@@ -48,7 +48,7 @@ def fetch_and_process_messages(client, validated_config: MessageBrokerTaskSource
 
     Yields
     ------
-    ControlMessage
+    IngestControlMessage
         The processed control message for each fetched job.
 
     Raises
@@ -56,7 +56,6 @@ def fetch_and_process_messages(client, validated_config: MessageBrokerTaskSource
     Exception
         If an irrecoverable error occurs during message processing.
     """
-
     while True:
         try:
             job = client.fetch_message(validated_config.task_queue, 100)
@@ -79,12 +78,12 @@ def fetch_and_process_messages(client, validated_config: MessageBrokerTaskSource
                 f"Irrecoverable error occurred during message processing, likely malformed JSON JOB structure: {err}"
             )
             traceback.print_exc()
-            continue  # Continue fetching the next message
+            continue
 
 
-def process_message(job: Dict, ts_fetched: datetime) -> ControlMessage:
+def process_message(job: Dict, ts_fetched: datetime) -> IngestControlMessage:
     """
-    Process a job and return a ControlMessage.
+    Process a job and return an IngestControlMessage.
 
     Parameters
     ----------
@@ -95,7 +94,7 @@ def process_message(job: Dict, ts_fetched: datetime) -> ControlMessage:
 
     Returns
     -------
-    ControlMessage
+    IngestControlMessage
         The control message created from the job.
 
     Raises
@@ -103,7 +102,6 @@ def process_message(job: Dict, ts_fetched: datetime) -> ControlMessage:
     Exception
         If the job fails validation or processing.
     """
-
     if logger.isEnabledFor(logging.DEBUG):
         no_payload = copy.deepcopy(job)
         if "content" in no_payload.get("job_payload", {}):
@@ -111,7 +109,7 @@ def process_message(job: Dict, ts_fetched: datetime) -> ControlMessage:
         logger.debug("Job: %s", json.dumps(no_payload, indent=2))
 
     validate_ingest_job(job)
-    control_message = ControlMessage()
+    control_message = IngestControlMessage()
 
     try:
         ts_entry = datetime.now()
@@ -124,24 +122,27 @@ def process_message(job: Dict, ts_fetched: datetime) -> ControlMessage:
         do_trace_tagging = tracing_options.get("trace", False)
         ts_send = tracing_options.get("ts_send", None)
         if ts_send is not None:
-            # ts_send is in nanoseconds
-            ts_send = datetime.fromtimestamp(ts_send / 1e9)
+            ts_send = datetime.fromtimestamp(ts_send / 1e9)  # Convert from nanoseconds to datetime
+
         trace_id = tracing_options.get("trace_id", None)
 
         response_channel = f"{job_id}"
 
-        df = cudf.DataFrame(job_payload)
-        message_meta = MessageMeta(df=df)
+        df = pd.DataFrame(job_payload)  # Convert incoming payload to cuDF DataFrame
 
-        control_message.payload(message_meta)
+        # Store pandas DataFrame directly in the control message
+        control_message.payload(df)
         annotate_cm(control_message, message="Created")
         control_message.set_metadata("response_channel", response_channel)
         control_message.set_metadata("job_id", job_id)
 
         for task in job_tasks:
-            control_message.add_task(task["type"], task["task_properties"])
+            task_props = task.get("task_properties", {})
+            if isinstance(task_props, BaseModel):
+                task_props = task_props.model_dump()
+            cmt = ControlMessageTask(**{"name": task["type"], "id": task["type"], "properties": task_props})
+            control_message.add_task(cmt)
 
-        # Debug Tracing
         if do_trace_tagging:
             ts_exit = datetime.now()
             control_message.set_metadata("config::add_trace_tagging", do_trace_tagging)
@@ -153,13 +154,13 @@ def process_message(job: Dict, ts_fetched: datetime) -> ControlMessage:
                 control_message.set_timestamp("trace::exit::broker_source_network_in", ts_fetched)
 
             if trace_id is not None:
-                # C++ layer in set_metadata errors out due to size of trace_id if it's an integer.
                 if isinstance(trace_id, int):
                     trace_id = format_trace_id(trace_id)
                 control_message.set_metadata("trace_id", trace_id)
 
             control_message.set_timestamp("latency::ts_send", datetime.now())
     except Exception as e:
+        # If job_id is still present in job, store partial info in the control message
         if "job_id" in job:
             job_id = job["job_id"]
             response_channel = f"{job_id}"
@@ -173,11 +174,10 @@ def process_message(job: Dict, ts_fetched: datetime) -> ControlMessage:
     return control_message
 
 
-@register_module(MODULE_NAME, MODULE_NAMESPACE)
 def _message_broker_task_source(builder: mrc.Builder):
     """
     A module for receiving messages from a message broker, converting them into DataFrames,
-    and attaching job IDs to ControlMessages.
+    and attaching job IDs to IngestControlMessages.
 
     Parameters
     ----------
@@ -189,10 +189,8 @@ def _message_broker_task_source(builder: mrc.Builder):
     ValueError
         If an unsupported client type is provided in the configuration.
     """
-
     validated_config = fetch_and_validate_module_config(builder, MessageBrokerTaskSourceSchema)
 
-    # Determine the client type and create the appropriate client
     client_type = validated_config.broker_client.client_type.lower()
     broker_params = validated_config.broker_client.broker_params or {}
 
@@ -207,29 +205,20 @@ def _message_broker_task_source(builder: mrc.Builder):
             use_ssl=broker_params.get("use_ssl", False),
         )
     elif client_type == "simple":
-        # Start or retrieve the singleton SimpleMessageBroker server
-        # TODO(Devin) add config param for max_queue_size
         max_queue_size = broker_params.get("max_queue_size", 10000)
-        server_host = validated_config.broker_client.host
         server_port = validated_config.broker_client.port
-
-        # TODO(Devin) add config param for server_host
         server_host = "0.0.0.0"
 
-        # Obtain the singleton instance
         server = SimpleMessageBroker(server_host, server_port, max_queue_size)
-
-        # Start the server if not already running
         if not hasattr(server, "server_thread") or not server.server_thread.is_alive():
             server_thread = threading.Thread(target=server.serve_forever)
-            server_thread.daemon = True  # Allows program to exit even if thread is running
-            server.server_thread = server_thread  # Attach the thread to the server instance
+            server_thread.daemon = True
+            server.server_thread = server_thread
             server_thread.start()
             logger.info(f"Started SimpleMessageBroker server on {server_host}:{server_port}")
         else:
             logger.info(f"SimpleMessageBroker server already running on {server_host}:{server_port}")
 
-        # Create the SimpleClient
         client = SimpleClient(
             host=server_host,
             port=server_port,
@@ -237,7 +226,6 @@ def _message_broker_task_source(builder: mrc.Builder):
             max_backoff=validated_config.broker_client.max_backoff,
             connection_timeout=validated_config.broker_client.connection_timeout,
         )
-
     else:
         raise ValueError(f"Unsupported client_type: {client_type}")
 
@@ -251,3 +239,6 @@ def _message_broker_task_source(builder: mrc.Builder):
     node.launch_options.engines_per_pe = validated_config.progress_engines
 
     builder.register_module_output("output", node)
+
+
+register_module(MODULE_NAME, MODULE_NAMESPACE)(_message_broker_task_source)

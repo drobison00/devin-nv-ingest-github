@@ -294,19 +294,3 @@ class IngestControlMessage:
         self._payload = payload
 
         return self._payload
-
-    def tensors(self, tensor=None):
-        """
-        Get or set the tensor memory (TensorMemory) for this control message.
-
-        Parameters
-        ----------
-        tensor : Any, optional
-            A TensorMemory-like object to set as the tensor data.
-
-        Returns
-        -------
-        Any
-            The current tensor data if tensor is None; otherwise returns nothing.
-        """
-        pass
