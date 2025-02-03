@@ -7,11 +7,11 @@ import logging
 import traceback
 
 import mrc
-from morpheus.messages import ControlMessage
 from morpheus.utils.module_utils import ModuleLoaderFactory
 from morpheus.utils.module_utils import register_module
 from mrc.core import operators as ops
 
+from nv_ingest.primitives.ingest_control_message import IngestControlMessage
 from nv_ingest.schemas.job_counter_schema import JobCounterSchema
 from nv_ingest.util.exception_handlers.decorators import nv_ingest_node_failure_context_manager
 from nv_ingest.util.modules.config_validator import fetch_and_validate_module_config
@@ -26,25 +26,60 @@ MODULE_NAMESPACE = "nv_ingest"
 JobCounterLoaderFactory = ModuleLoaderFactory(MODULE_NAME, MODULE_NAMESPACE)
 
 
+def _count_jobs(message: IngestControlMessage, stat_name: str, stats: GlobalStats) -> IngestControlMessage:
+    """
+    Increment the specified statistic in the global statistics structure. If `completed_jobs`
+    is being incremented and the message has `cm_failed` set, then increment `failed_jobs`
+    instead.
+
+    Parameters
+    ----------
+    message : IngestControlMessage
+        The control message being processed.
+    stat_name : str
+        The name of the stat to increment.
+    stats : GlobalStats
+        The global statistics instance.
+
+    Returns
+    -------
+    IngestControlMessage
+        The original message after incrementing the relevant statistic.
+
+    Raises
+    ------
+    ValueError
+        If any error occurs while incrementing the statistics.
+    """
+    try:
+        logger.debug(f"Performing job counter on stat '{stat_name}'")
+        if stat_name == "completed_jobs":
+            if message.has_metadata("cm_failed") and message.get_metadata("cm_failed"):
+                stats.increment_stat("failed_jobs")
+            else:
+                stats.increment_stat("completed_jobs")
+            return message
+
+        stats.increment_stat(stat_name)
+        return message
+    except Exception as e:
+        traceback.print_exc()
+        raise ValueError(f"Failed to run job counter: {e}")
+
+
 @register_module(MODULE_NAME, MODULE_NAMESPACE)
 def _job_counter(builder: mrc.Builder) -> None:
     """
-    Module for counting submitted jobs and updating the global statistics.
-
-    This module sets up a job counter that increments a specified statistic in the global
-    statistics structure each time a message is processed.
+    Module for counting submitted jobs and updating the global statistics. This module sets up
+    a job counter that increments a specified statistic in the global statistics structure for
+    each processed message.
 
     Parameters
     ----------
     builder : mrc.Builder
         The module configuration builder.
-
-    Returns
-    -------
-    None
     """
     validated_config = fetch_and_validate_module_config(builder, JobCounterSchema)
-
     stats = GlobalStats.get_instance()
 
     @traceable(MODULE_NAME)
@@ -53,26 +88,15 @@ def _job_counter(builder: mrc.Builder) -> None:
         raise_on_failure=validated_config.raise_on_failure,
         skip_processing_if_failed=False,
     )
-    def count_jobs(message: ControlMessage) -> ControlMessage:
-        try:
-            logger.debug(f"Performing job counter: {validated_config.name}")
+    def _wrapped_count_jobs(message: IngestControlMessage) -> IngestControlMessage:
+        """
+        Wraps the global `count_jobs` function to pass in the validated config
+        and global stats. This allows for direct testing of `count_jobs` without
+        the overhead of pipeline operators.
+        """
+        return _count_jobs(message, validated_config.name, stats)
 
-            if validated_config.name == "completed_jobs":
-                if message.has_metadata("cm_failed") and message.get_metadata("cm_failed"):
-                    stats.increment_stat("failed_jobs")
-                else:
-                    stats.increment_stat("completed_jobs")
-                return message
+    job_counter_node = builder.make_node(f"{validated_config.name}_counter", ops.map(_wrapped_count_jobs))
 
-            stats.increment_stat(validated_config.name)
-
-            return message
-        except Exception as e:
-            traceback.print_exc()
-            raise ValueError(f"Failed to run job counter: {e}")
-
-    job_counter_node = builder.make_node(f"{validated_config.name}_counter", ops.map(count_jobs))
-
-    # Register the input and output of the module
     builder.register_module_input("input", job_counter_node)
     builder.register_module_output("output", job_counter_node)
