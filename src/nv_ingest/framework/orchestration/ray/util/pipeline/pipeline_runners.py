@@ -22,7 +22,10 @@ from nv_ingest.framework.orchestration.ray.primitives.ray_pipeline import (
     RayPipelineSubprocessInterface,
     RayPipelineInterface,
 )
-from nv_ingest.framework.orchestration.ray.util.pipeline.pipeline_builders import setup_ingestion_pipeline
+from nv_ingest.framework.orchestration.ray.util.pipeline.pipeline_builders import (
+    setup_ingestion_pipeline,
+    initialize_ray_cluster,
+)
 from nv_ingest.framework.orchestration.ray.util.env_config import (
     DISABLE_DYNAMIC_SCALING,
     DYNAMIC_MEMORY_THRESHOLD,
@@ -249,6 +252,7 @@ def _launch_pipeline(
         rcm_memory_safety_buffer_fraction=DYNAMIC_MEMORY_RCM_MEMORY_SAFETY_BUFFER_FRACTION,
     )
 
+    initialize_ray_cluster()
     pipeline = RayPipeline(scaling_config=scaling_config)
     start_abs = datetime.now()
 

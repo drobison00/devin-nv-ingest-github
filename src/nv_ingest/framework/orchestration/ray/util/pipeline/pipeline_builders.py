@@ -47,37 +47,81 @@ def export_config_to_env(ingest_config: Any) -> None:
     os.environ.update({key.upper(): val for key, val in ingest_config.items()})
 
 
+def initialize_ray_cluster(logging_level: int = None) -> Any:
+    """
+    Initialize Ray cluster connection or local Ray instance.
+
+    Checks for RAY_CLUSTER_ADDRESS environment variable:
+    - If set: Connects to existing Ray cluster at the specified address
+    - If not set: Initializes local Ray instance with single-node configuration
+
+    Parameters
+    ----------
+    logging_level : int, optional
+        Logging level for Ray. If None, uses current logger's effective level.
+
+    Returns
+    -------
+    Any
+        Ray context object from ray.init()
+    """
+    if logging_level is None:
+        logging_level = logging.getLogger().getEffectiveLevel()
+
+    # Check for cluster address environment variable
+    ray_cluster_address = os.environ.get("RAY_CLUSTER_ADDRESS", None)
+    ray_namespace = os.environ.get("RAY_NAMESPACE", "nv_ingest_ray")
+
+    if ray_cluster_address:
+        # Connect to existing Ray cluster
+        logger.info(f"Connecting to Ray cluster at: {ray_cluster_address}")
+        ray_context = ray.init(
+            address=ray_cluster_address,
+            namespace=ray_namespace,
+            logging_level=logging_level,
+            ignore_reinit_error=True,
+        )
+        logger.info(f"Successfully connected to Ray cluster. Namespace: {ray_namespace}")
+    else:
+        # Initialize local Ray instance
+        logger.info("Starting local Ray instance (single-node mode)")
+        ray_context = ray.init(
+            namespace=ray_namespace,
+            logging_level=logging_level,
+            ignore_reinit_error=True,
+            dashboard_host="0.0.0.0",
+            dashboard_port=8265,
+            _system_config={
+                "local_fs_capacity_threshold": 0.9,
+                "object_spilling_config": json.dumps(
+                    {
+                        "type": "filesystem",
+                        "params": {
+                            "directory_path": [
+                                "/tmp/ray_spill_testing_0",
+                                "/tmp/ray_spill_testing_1",
+                                "/tmp/ray_spill_testing_2",
+                                "/tmp/ray_spill_testing_3",
+                            ],
+                            "buffer_size": 100_000_000,
+                        },
+                    },
+                ),
+            },
+        )
+        logger.info(f"Local Ray instance started. Dashboard: http://localhost:8265, Namespace: {ray_namespace}")
+
+    return ray_context
+
+
 def setup_ingestion_pipeline(pipeline: RayPipeline, ingest_config: Dict[str, Any] = None):
     # Initialize the pipeline with the configuration
     if ingest_config:
         # Export the config to environment variables
         export_config_to_env(ingest_config)
 
-    current_level = logging.getLogger().getEffectiveLevel()
-    ray_context = ray.init(
-        namespace="nv_ingest_ray",
-        logging_level=current_level,
-        ignore_reinit_error=True,
-        dashboard_host="0.0.0.0",
-        dashboard_port=8265,
-        _system_config={
-            "local_fs_capacity_threshold": 0.9,
-            "object_spilling_config": json.dumps(
-                {
-                    "type": "filesystem",
-                    "params": {
-                        "directory_path": [
-                            "/tmp/ray_spill_testing_0",
-                            "/tmp/ray_spill_testing_1",
-                            "/tmp/ray_spill_testing_2",
-                            "/tmp/ray_spill_testing_3",
-                        ],
-                        "buffer_size": 100_000_000,
-                    },
-                },
-            ),
-        },
-    )
+    ray_context = initialize_ray_cluster()
+
     system_resource_probe = SystemResourceProbe()
 
     effective_cpu_core_count = system_resource_probe.get_effective_cores()
