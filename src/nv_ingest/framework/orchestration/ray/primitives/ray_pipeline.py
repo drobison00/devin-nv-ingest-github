@@ -20,6 +20,7 @@ from pydantic import BaseModel
 import concurrent.futures
 import logging
 import time
+from typing import Callable
 
 from nv_ingest.framework.orchestration.ray.primitives.pipeline_topology import PipelineTopology, StageInfo
 from nv_ingest.framework.orchestration.ray.primitives.ray_stat_collector import RayStatsCollector
@@ -407,8 +408,8 @@ class RayPipeline(PipelineInterface):
         current_stage_actors = self.topology.get_stage_actors()  # Gets copy
 
         for from_stage_name, connections_list in current_connections.items():
-            for to_stage_name, queue_size in connections_list:
-                queue_name = f"{from_stage_name}_to_{to_stage_name}"
+            for to_stage_name, queue_size, edge_name in connections_list:
+                queue_name = f"{from_stage_name}_to_{to_stage_name}_{edge_name}"
                 logger.debug(f"[Build-Wiring] Creating queue '{queue_name}' (size {queue_size}) and wiring.")
                 try:
                     edge_queue = RayQueue(maxsize=queue_size, actor_options={"max_restarts": 0})
@@ -417,7 +418,10 @@ class RayPipeline(PipelineInterface):
                     # Wire using current actors from topology snapshot
                     source_actors = current_stage_actors.get(from_stage_name, [])
                     for actor in source_actors:
-                        wiring_refs.append(actor.set_output_queue.remote(edge_queue))
+                        if hasattr(actor, "set_output_queue"):
+                            wiring_refs.append(actor.set_output_queue.remote(edge_queue))
+                        elif hasattr(actor, "set_output_queues"):
+                            wiring_refs.append(actor.set_output_queues.remote({edge_name: edge_queue}))
 
                     dest_actors = current_stage_actors.get(to_stage_name, [])
                     for actor in dest_actors:
@@ -454,171 +458,30 @@ class RayPipeline(PipelineInterface):
             logger.error(f"[Build-WaitWiring] Error during wiring confirmation: {e}", exc_info=True)
             raise RuntimeError("Build failed: error confirming initial wiring") from e
 
-    def add_source(
-        self, *, name: str, source_actor: Any, config: BaseModel, min_replicas: int = 1, max_replicas: int = 1
-    ) -> "RayPipeline":
+    def _apply_output_selectors(self) -> List[ray.ObjectRef]:
         """
-        Adds a source stage to the pipeline.
-
-        Parameters
-        ----------
-        name : str
-            The name of the source stage.
-        source_actor : Any
-            The actor or callable for the source stage.
-        config : BaseModel
-            The configuration for the source stage.
-        min_replicas : int, optional
-            The minimum number of replicas for the source stage, by default 1.
-        max_replicas : int, optional
-            The maximum number of replicas for the source stage, by default 1.
+        Applies output selector functions to stage actors.
 
         Returns
         -------
-        RayPipeline
-            The pipeline instance.
+        List[ray.ObjectRef]
+            List of remote method calls for setting selectors.
         """
-        if min_replicas < 1:
-            logger.warning(f"Source stage '{name}': min_replicas must be >= 1. Overriding.")
-            min_replicas = 1
+        selector_refs = []
+        current_stage_actors = self.topology.get_stage_actors()
 
-        stage_info = StageInfo(
-            name=name,
-            callable=source_actor,
-            config=config,
-            is_source=True,
-            min_replicas=min_replicas,
-            max_replicas=max_replicas,
-        )
-        self.topology.add_stage(stage_info)  # Delegate
+        for stage_name, actors in current_stage_actors.items():
+            selector_func = self.topology.get_stage_output_selector(stage_name)
+            if selector_func:
+                for actor in actors:
+                    try:
+                        selector_refs.append(actor.set_output_selector.remote(selector_func))
+                        logger.debug(f"Applied output selector to {stage_name} actor")
+                    except Exception as e:
+                        logger.warning(f"Failed to set output selector for {stage_name}: {e}")
 
-        return self
+        return selector_refs
 
-    def add_stage(
-        self,
-        *,
-        name: str,
-        stage_actor: Any,
-        config: BaseModel,
-        min_replicas: int = 0,
-        max_replicas: int = 1,
-    ) -> "RayPipeline":
-        """
-        Adds a stage to the pipeline.
-
-        Parameters
-        ----------
-        name : str
-            The name of the stage.
-        stage_actor : Any
-            The actor or callable for the stage.
-        config : BaseModel
-            The configuration for the stage.
-        min_replicas : int, optional
-            The minimum number of replicas for the stage, by default 0.
-        max_replicas : int, optional
-            The maximum number of replicas for the stage, by default 1.
-
-        Returns
-        -------
-        RayPipeline
-            The pipeline instance.
-        """
-        if min_replicas < 0:
-            logger.warning(f"Stage '{name}': min_replicas cannot be negative. Overriding to 0.")
-            min_replicas = 0
-
-        resolved_actor = stage_actor
-
-        # Support module path (e.g., "mypkg.mymodule:my_lambda")
-        if isinstance(stage_actor, str):
-            resolved_actor = resolve_callable_from_path(
-                callable_path=stage_actor, signature_schema=ingest_stage_callable_signature
-            )
-
-        # Wrap callables
-        if isinstance(resolved_actor, FunctionType):
-            schema_type = type(config)
-            resolved_actor = wrap_callable_as_stage(resolved_actor, schema_type)
-
-        stage_info = StageInfo(
-            name=name,
-            callable=resolved_actor,
-            config=config,
-            min_replicas=min_replicas,
-            max_replicas=max_replicas,
-        )
-        self.topology.add_stage(stage_info)
-
-        return self
-
-    def add_sink(
-        self, *, name: str, sink_actor: Any, config: BaseModel, min_replicas: int = 1, max_replicas: int = 1
-    ) -> "RayPipeline":
-        """
-        Adds a sink stage to the pipeline.
-
-        Parameters
-        ----------
-        name : str
-            The name of the sink stage.
-        sink_actor : Any
-            The actor or callable for the sink stage.
-        config : BaseModel
-            The configuration for the sink stage.
-        min_replicas : int, optional
-            The minimum number of replicas for the sink stage, by default 1.
-        max_replicas : int, optional
-            The maximum number of replicas for the sink stage, by default 1.
-
-        Returns
-        -------
-        RayPipeline
-            The pipeline instance.
-        """
-        # Sink min_replicas can realistically be 0 if data drain is optional/best-effort? Let's allow 0.
-        if min_replicas < 0:
-            logger.warning(f"Sink stage '{name}': min_replicas cannot be negative. Overriding to 0.")
-            min_replicas = 0
-        stage_info = StageInfo(
-            name=name,
-            callable=sink_actor,
-            config=config,
-            is_sink=True,
-            min_replicas=min_replicas,
-            max_replicas=max_replicas,
-        )
-        self.topology.add_stage(stage_info)  # Delegate
-
-        return self
-
-    # --- Method for defining connections ---
-    def make_edge(self, from_stage: str, to_stage: str, queue_size: int = 100) -> "RayPipeline":
-        """
-        Creates an edge between two stages in the pipeline.
-
-        Parameters
-        ----------
-        from_stage : str
-            The name of the source stage.
-        to_stage : str
-            The name of the destination stage.
-        queue_size : int, optional
-            The size of the queue between the stages, by default 100.
-
-        Returns
-        -------
-        RayPipeline
-            The pipeline instance.
-        """
-        try:
-            self.topology.add_connection(from_stage, to_stage, queue_size)  # Delegate (includes validation)
-        except ValueError as e:
-            logger.error(f"make_edge failed: {e}")
-            raise  # Re-raise the error
-        return self
-
-    # ----- Pipeline Build Process ---
     def build(self) -> Dict[str, List[Any]]:
         """
         Builds the pipeline: configures, instantiates, wires, using topology.
@@ -639,6 +502,8 @@ class RayPipeline(PipelineInterface):
             self._instantiate_initial_actors()
             wiring_futures = self._create_and_wire_edges()
             self._wait_for_wiring(wiring_futures)
+            selector_refs = self._apply_output_selectors()
+            ray.get(selector_refs)
 
             logger.info("--- Pipeline Build Completed Successfully ---")
             return self.topology.get_stage_actors()  # Return actors from topology
@@ -710,17 +575,17 @@ class RayPipeline(PipelineInterface):
 
         # Wire outputs
         if stage_name in connections:
-            for to_stage, _ in connections[stage_name]:
-                queue_name = f"{stage_name}_to_{to_stage}"
+            for to_stage, _, edge_name in connections[stage_name]:
+                queue_name = f"{stage_name}_to_{to_stage}_{edge_name}"
                 if queue_name in edge_queues:
                     edge_queue, _ = edge_queues[queue_name]
                     wiring_refs.append(actor.set_output_queue.remote(edge_queue))
 
         # Wire inputs
         for from_stage, conns in connections.items():
-            for to_stage, _ in conns:
+            for to_stage, _, edge_name in conns:
                 if to_stage == stage_name:
-                    queue_name = f"{from_stage}_to_{stage_name}"
+                    queue_name = f"{from_stage}_to_{to_stage}_{edge_name}"
                     if queue_name in edge_queues:
                         edge_queue, _ = edge_queues[queue_name]
                         wiring_refs.append(actor.set_input_queue.remote(edge_queue))
@@ -1093,8 +958,8 @@ class RayPipeline(PipelineInterface):
             wiring_refs = []
             wiring_timeout = 120.0
             for from_stage_name, conns in current_connections.items():
-                for to_stage_name, _ in conns:
-                    queue_name = f"{from_stage_name}_to_{to_stage_name}"
+                for to_stage_name, _, edge_name in conns:
+                    queue_name = f"{from_stage_name}_to_{to_stage_name}_{edge_name}"
                     if queue_name not in new_edge_queues_map:
                         raise RuntimeError(f"New queue missing for {queue_name}")
                     new_queue_actor, _ = new_edge_queues_map[queue_name]
@@ -1102,7 +967,10 @@ class RayPipeline(PipelineInterface):
                     # Re-wire sources outputs
                     for actor in current_stage_actors.get(from_stage_name, []):
                         try:
-                            wiring_refs.append(actor.set_output_queue.remote(new_queue_actor))
+                            if hasattr(actor, "set_output_queue"):
+                                wiring_refs.append(actor.set_output_queue.remote(new_queue_actor))
+                            elif hasattr(actor, "set_output_queues"):
+                                wiring_refs.append(actor.set_output_queues.remote({edge_name: new_queue_actor}))
                         except Exception as e:
                             logger.error(f"Failed sending set_output_queue to {actor}: {e}")
 
@@ -1623,3 +1491,205 @@ class RayPipeline(PipelineInterface):
         Exit the runtime context related to this object.
         """
         self.stop()
+
+    def add_source(
+        self, *, name: str, source_actor: Any, config: BaseModel, min_replicas: int = 1, max_replicas: int = 1
+    ) -> "RayPipeline":
+        """
+        Adds a source stage to the pipeline.
+
+        Parameters
+        ----------
+        name : str
+            The name of the source stage.
+        source_actor : Any
+            The actor or callable for the source stage.
+        config : BaseModel
+            The configuration for the source stage.
+        min_replicas : int, optional
+            The minimum number of replicas for the source stage, by default 1.
+        max_replicas : int, optional
+            The maximum number of replicas for the source stage, by default 1.
+
+        Returns
+        -------
+        RayPipeline
+            The pipeline instance.
+        """
+        if min_replicas < 1:
+            logger.warning(f"Source stage '{name}': min_replicas must be >= 1. Overriding.")
+            min_replicas = 1
+
+        stage_info = StageInfo(
+            name=name,
+            callable=source_actor,
+            config=config,
+            is_source=True,
+            min_replicas=min_replicas,
+            max_replicas=max_replicas,
+        )
+        self.topology.add_stage(stage_info)  # Delegate
+
+        return self
+
+    def add_stage(
+        self,
+        *,
+        name: str,
+        stage_actor: Any,
+        config: BaseModel,
+        min_replicas: int = 0,
+        max_replicas: int = 1,
+    ) -> "RayPipeline":
+        """
+        Adds a stage to the pipeline.
+
+        Parameters
+        ----------
+        name : str
+            The name of the stage.
+        stage_actor : Any
+            The actor or callable for the stage.
+        config : BaseModel
+            The configuration for the stage.
+        min_replicas : int, optional
+            The minimum number of replicas for the stage, by default 0.
+        max_replicas : int, optional
+            The maximum number of replicas for the stage, by default 1.
+
+        Returns
+        -------
+        RayPipeline
+            The pipeline instance.
+        """
+        if min_replicas < 0:
+            logger.warning(f"Stage '{name}': min_replicas cannot be negative. Overriding to 0.")
+            min_replicas = 0
+
+        resolved_actor = stage_actor
+
+        # Support module path (e.g., "mypkg.mymodule:my_lambda")
+        if isinstance(stage_actor, str):
+            resolved_actor = resolve_callable_from_path(
+                callable_path=stage_actor, signature_schema=ingest_stage_callable_signature
+            )
+
+        # Wrap callables
+        if isinstance(resolved_actor, FunctionType):
+            schema_type = type(config)
+            resolved_actor = wrap_callable_as_stage(resolved_actor, schema_type)
+
+        stage_info = StageInfo(
+            name=name,
+            callable=resolved_actor,
+            config=config,
+            min_replicas=min_replicas,
+            max_replicas=max_replicas,
+        )
+        self.topology.add_stage(stage_info)
+
+        return self
+
+    def add_sink(
+        self, *, name: str, sink_actor: Any, config: BaseModel, min_replicas: int = 1, max_replicas: int = 1
+    ) -> "RayPipeline":
+        """
+        Adds a sink stage to the pipeline.
+
+        Parameters
+        ----------
+        name : str
+            The name of the sink stage.
+        sink_actor : Any
+            The actor or callable for the sink stage.
+        config : BaseModel
+            The configuration for the sink stage.
+        min_replicas : int, optional
+            The minimum number of replicas for the sink stage, by default 1.
+        max_replicas : int, optional
+            The maximum number of replicas for the sink stage, by default 1.
+
+        Returns
+        -------
+        RayPipeline
+            The pipeline instance.
+        """
+        # Sink min_replicas can realistically be 0 if data drain is optional/best-effort? Let's allow 0.
+        if min_replicas < 0:
+            logger.warning(f"Sink stage '{name}': min_replicas cannot be negative. Overriding to 0.")
+            min_replicas = 0
+        stage_info = StageInfo(
+            name=name,
+            callable=sink_actor,
+            config=config,
+            is_sink=True,
+            min_replicas=min_replicas,
+            max_replicas=max_replicas,
+        )
+        self.topology.add_stage(stage_info)  # Delegate
+
+        return self
+
+    # --- Method for defining connections ---
+    def make_edge(
+        self, from_stage: str, to_stage: str, queue_size: int = 100, edge_name: Optional[str] = None
+    ) -> "RayPipeline":
+        """
+        Creates an edge between two stages in the pipeline.
+
+        Parameters
+        ----------
+        from_stage : str
+            The name of the source stage.
+        to_stage : str
+            The name of the destination stage.
+        queue_size : int, optional
+            The size of the queue between the stages, by default 100.
+        edge_name : Optional[str], optional
+            The name of the edge/queue. If None, defaults to the to_stage name.
+            This allows multiple edges from one stage to another with different names.
+
+        Returns
+        -------
+        RayPipeline
+            The pipeline instance.
+        """
+        # Default edge name to destination stage name
+        if edge_name is None:
+            edge_name = to_stage
+
+        try:
+            self.topology.add_connection(from_stage, to_stage, queue_size, edge_name)  # Delegate (includes validation)
+        except ValueError as e:
+            logger.error(f"make_edge failed: {e}")
+            raise  # Re-raise the error
+        return self
+
+    def set_output_selector(
+        self, stage_name: str, selector_func: Callable[["IngestControlMessage"], str]  # noqa
+    ) -> "RayPipeline":
+        """
+        Sets an output selector function for a stage.
+
+        The selector function determines which named output queue to route each message to
+        based on the content of the IngestControlMessage.
+
+        Parameters
+        ----------
+        stage_name : str
+            The name of the stage to set the selector for.
+        selector_func : Callable[[IngestControlMessage], str]
+            Function that takes an IngestControlMessage and returns the name of the
+            output queue to route the message to.
+
+        Returns
+        -------
+        RayPipeline
+            The pipeline instance.
+        """
+        try:
+            self.topology.set_stage_output_selector(stage_name, selector_func)
+        except ValueError as e:
+            logger.error(f"set_output_selector failed: {e}")
+            raise
+        return self

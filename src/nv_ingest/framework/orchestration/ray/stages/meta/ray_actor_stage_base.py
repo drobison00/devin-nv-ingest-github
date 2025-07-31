@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List, Callable
 import os
 import psutil
 
@@ -114,6 +114,13 @@ class RayActorStage(ABC):
         # --- State for processing rate calculation ---
         self._last_processed_count: int = 0
         self._last_stats_time: Optional[float] = None
+
+        # --- Named output queues support (backward compatible) ---
+        self._output_queues: Dict[str, Any] = {}  # name -> queue_handle mapping
+        self._default_queue_name: str = "default"
+
+        # --- Output selector support ---
+        self._output_selector: Optional[Callable[["IngestControlMessage"], str]] = None  # noqa
 
         # --- Threading and shutdown management ---
         self._processing_thread: Optional[threading.Thread] = None
@@ -306,13 +313,29 @@ class RayActorStage(ABC):
                     # Step 2: Process the retrieved message using subclass-specific logic.
                     updated_cm = self.on_data(control_message)
 
-                    # If there's a valid result and an output queue is configured, attempt to put.
-                    if self._output_queue is not None and updated_cm is not None:
+                    # If there's a valid result and output queues are configured, attempt to put.
+                    if updated_cm is not None and (self._output_queue is not None or self._output_queues):
                         object_ref_to_put = None  # Ensure var exists for the finally block
                         try:
+                            # Determine which output queue to use
+                            if self._output_queues:
+                                # Use named queues with selector
+                                output_queue_name = self._route_output(control_message)
+                                output_queue = self._output_queues.get(output_queue_name)
+                                if output_queue is None:
+                                    # Fallback to default queue or single output queue
+                                    output_queue = self._output_queues.get(self._default_queue_name, self._output_queue)
+                            else:
+                                # Backward compatibility: use single output queue
+                                output_queue = self._output_queue
+
+                            if output_queue is None:
+                                self._logger.warning(f"{self._actor_id_str}: No valid output queue found for message.")
+                                continue
+
                             # Get the handle of the queue actor to set it as the owner.
                             # This decouples the object's lifetime from this actor.
-                            owner_actor = self._output_queue.actor
+                            owner_actor = output_queue.actor
 
                             # Put the object into Plasma, transferring ownership.
                             object_ref_to_put = ray.put(updated_cm, _owner=owner_actor)
@@ -324,7 +347,7 @@ class RayActorStage(ABC):
                             is_put_successful = False
                             while not is_put_successful:
                                 try:
-                                    self._output_queue.put(object_ref_to_put)
+                                    output_queue.put(object_ref_to_put)
                                     self.stats["successful_queue_writes"] += 1
                                     is_put_successful = True  # Exit retry loop on success
                                 except Exception as e_put:
@@ -578,4 +601,118 @@ class RayActorStage(ABC):
         """
         self._logger.debug(f"{self._actor_id_str}: Setting output queue.")
         self._output_queue = queue_handle
+        # Also add to named queues for unified handling
+        self._output_queues[self._default_queue_name] = queue_handle
         return True
+
+    @ray.method(num_returns=1)
+    def add_output_queue(self, name: str, queue_handle: Any) -> bool:
+        """
+        Adds a named output queue handle for this actor stage.
+
+        This allows the stage to route output to different queues based on content.
+        Should be called before `start()`.
+
+        Parameters
+        ----------
+        name : str
+            The name identifier for this output queue.
+        queue_handle : Any
+            The Ray queue handle (e.g., `ray.util.queue.Queue`) to which
+            this actor should write output items for this named route.
+
+        Returns
+        -------
+        bool
+            True indicating the named queue was added.
+        """
+        self._logger.debug(f"{self._actor_id_str}: Adding named output queue '{name}'.")
+        self._output_queues[name] = queue_handle
+        return True
+
+    @ray.method(num_returns=1)
+    def set_output_queues(self, queue_mapping: Dict[str, Any]) -> bool:
+        """
+        Sets multiple named output queues at once.
+
+        Should be called before `start()`.
+
+        Parameters
+        ----------
+        queue_mapping : Dict[str, Any]
+            Dictionary mapping queue names to queue handles.
+
+        Returns
+        -------
+        bool
+            True indicating the queues were set.
+        """
+        self._logger.debug(f"{self._actor_id_str}: Setting {len(queue_mapping)} named output queues.")
+        self._output_queues.update(queue_mapping)
+        # Update default queue if present
+        if self._default_queue_name in queue_mapping:
+            self._output_queue = queue_mapping[self._default_queue_name]
+        return True
+
+    def get_output_queue_names(self) -> List[str]:
+        """
+        Get the names of all configured output queues.
+
+        Returns
+        -------
+        List[str]
+            List of queue names that have been configured.
+        """
+        return list(self._output_queues.keys())
+
+    @ray.method(num_returns=1)
+    def set_output_selector(self, selector_func: Callable[["IngestControlMessage"], str]) -> bool:  # noqa
+        """
+        Sets the output selector function for this stage.
+
+        The selector function determines which named output queue to route each message to
+        based on the content of the IngestControlMessage.
+
+        Parameters
+        ----------
+        selector_func : Callable[[IngestControlMessage], str]
+            Function that takes an IngestControlMessage and returns the name of the
+            output queue to route the message to.
+
+        Returns
+        -------
+        bool
+            True indicating the selector was set.
+        """
+        self._logger.debug(f"{self._actor_id_str}: Setting output selector function.")
+        self._output_selector = selector_func
+        return True
+
+    def _route_output(self, control_message: "IngestControlMessage") -> str:  # noqa
+        """
+        Determine which output queue to route the message to.
+
+        Parameters
+        ----------
+        control_message : IngestControlMessage
+            The message to route.
+
+        Returns
+        -------
+        str
+            The name of the output queue to use.
+        "
+        Applies output selector functions to stage actors.
+
+        Returns
+        -------
+        List[ray.ObjectRef]
+            List of remote method calls for setting selectors.
+        """
+        if self._output_selector:
+            try:
+                return self._output_selector(control_message)
+            except Exception as e:
+                self._logger.warning(f"{self._actor_id_str}: Output selector failed: {e}. Using default queue.")
+                return self._default_queue_name
+        return self._default_queue_name

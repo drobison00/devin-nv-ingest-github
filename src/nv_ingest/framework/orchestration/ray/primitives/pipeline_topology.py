@@ -51,7 +51,9 @@ class PipelineTopology:
     def __init__(self):
         # --- Definition ---
         self._stages: List[StageInfo] = []
-        self._connections: Dict[str, List[Tuple[str, int]]] = {}
+        self._connections: Dict[str, List[Tuple[str, int, str]]] = (
+            {}
+        )  # Map: from_stage -> [(to_stage, queue_size, edge_name)]
 
         # --- Runtime State ---
         self._stage_actors: Dict[str, List[Any]] = {}
@@ -59,6 +61,7 @@ class PipelineTopology:
         self._scaling_state: Dict[str, str] = {}  # Map: stage_name -> "Idle" | "Scaling Up" | "Scaling Down" | "Error"
         self._stage_memory_overhead: Dict[str, float] = {}  # Populated during build/config
         self._actors_pending_removal: Set[Tuple[str, Any]] = set()
+        self._stage_output_selectors: Dict[str, Any] = {}  # Map: stage_name -> selector_function
 
         # --- Operational State ---
         self._is_flushing: bool = False
@@ -87,6 +90,7 @@ class PipelineTopology:
             self._actors_pending_removal.clear()
             self._stages.clear()
             self._connections.clear()
+            self._stage_output_selectors.clear()
         except Exception as e:
             logger.warning(f"Error clearing internal state during __del__: {e}")
 
@@ -109,7 +113,7 @@ class PipelineTopology:
             self._stages.append(stage_info)
             logger.debug(f"Added stage definition: {stage_info.name}")
 
-    def add_connection(self, from_stage: str, to_stage: str, queue_size: int) -> None:
+    def add_connection(self, from_stage: str, to_stage: str, queue_size: int, edge_name: str) -> None:
         """Adds a connection definition between two stages."""
         with self._lock:
             # Basic validation (more can be added in Pipeline class)
@@ -119,8 +123,10 @@ class PipelineTopology:
             if to_stage not in stage_names:
                 raise ValueError(f"Destination stage '{to_stage}' for connection not found.")
 
-            self._connections.setdefault(from_stage, []).append((to_stage, queue_size))
-            logger.debug(f"Added connection definition: {from_stage} -> {to_stage} (q_size={queue_size})")
+            self._connections.setdefault(from_stage, []).append((to_stage, queue_size, edge_name))
+            logger.debug(
+                f"Added connection definition: {from_stage} -> {to_stage} (q_size={queue_size}, edge_name={edge_name})"
+            )
 
     def set_actors_for_stage(self, stage_name: str, actors: List[Any]) -> None:
         """Sets the list of actors for a given stage, resetting scaling state."""
@@ -271,6 +277,12 @@ class PipelineTopology:
             self._stage_memory_overhead = overheads
             logger.debug(f"Set memory overheads for {len(overheads)} stages.")
 
+    def set_stage_output_selector(self, stage_name: str, selector: Any) -> None:
+        """Sets the output selector for a stage."""
+        with self._lock:
+            self._stage_output_selectors[stage_name] = selector
+            logger.debug(f"Set output selector for stage '{stage_name}'.")
+
     def clear_runtime_state(self) -> None:
         """Clears actors, queues, and scaling state. Keeps definitions."""
         with self._lock:
@@ -316,7 +328,7 @@ class PipelineTopology:
                     return stage
             return None
 
-    def get_connections(self) -> Dict[str, List[Tuple[str, int]]]:
+    def get_connections(self) -> Dict[str, List[Tuple[str, int, str]]]:
         """Returns a shallow copy of the connection dictionary."""
         with self._lock:
             # Shallow copy is usually sufficient here as tuples are immutable
@@ -351,3 +363,8 @@ class PipelineTopology:
         """Returns a copy of the stage memory overhead dictionary."""
         with self._lock:
             return self._stage_memory_overhead.copy()
+
+    def get_stage_output_selector(self, stage_name: str) -> Any:
+        """Returns the output selector for a stage."""
+        with self._lock:
+            return self._stage_output_selectors.get(stage_name)
