@@ -140,3 +140,129 @@ def yolox_grpc_infer_with_timing(
                 client.close()
         except Exception:
             pass
+
+
+def yolox_graphic_grpc_infer_with_timing(
+    endpoint: str,
+    auth_token: str,
+    image_np: np.ndarray,
+    batch_size: int,
+    timeout: int,
+) -> Tuple[object, float]:
+    """
+    Perform a single Yolox (graphic-elements) inference over gRPC and measure elapsed time.
+    Mirrors yolox_grpc_infer_with_timing but uses YoloxGraphicElementsModelInterface.
+    """
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        api_src = os.path.abspath(os.path.join(here, "..", "..", "..", "api", "src"))
+        if api_src not in sys.path:
+            sys.path.insert(0, api_src)
+
+        from nv_ingest_api.internal.primitives.nim.model_interface.yolox import (  # type: ignore
+            YoloxGraphicElementsModelInterface,
+            get_yolox_model_name,
+        )
+        from nv_ingest_api.util.nim import create_inference_client  # type: ignore
+    except Exception:
+        return "error", 0.0
+
+    model_interface = YoloxGraphicElementsModelInterface()
+    client = None
+    start = time.time()
+    try:
+        client = create_inference_client(
+            (endpoint, ""),
+            model_interface,
+            auth_token,
+            infer_protocol="grpc",
+            timeout=float(timeout),
+        )
+        model_name = get_yolox_model_name(endpoint, default_model_name="yolox_ensemble")
+
+        data = {"images": [image_np for _ in range(max(1, batch_size))]}
+        _ = client.infer(
+            data,
+            model_name=model_name,
+            max_batch_size=max(1, batch_size),
+            trace_info=None,
+            stage_name="concurrency_test",
+            input_names=["INPUT_IMAGES", "THRESHOLDS"],
+            dtypes=["BYTES", "FP32"],
+            output_names=["OUTPUT"],
+        )
+        elapsed = time.time() - start
+        if elapsed > timeout:
+            return "timeout", elapsed
+        return 200, elapsed
+    except Exception:
+        return "error", time.time() - start
+    finally:
+        try:
+            if client is not None:
+                client.close()
+        except Exception:
+            pass
+
+
+def yolox_table_grpc_infer_with_timing(
+    endpoint: str,
+    auth_token: str,
+    image_np: np.ndarray,
+    batch_size: int,
+    timeout: int,
+) -> Tuple[object, float]:
+    """
+    Perform a single Yolox (table-structure) inference over gRPC and measure elapsed time.
+    Mirrors yolox_grpc_infer_with_timing but uses YoloxTableStructureModelInterface.
+    """
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        api_src = os.path.abspath(os.path.join(here, "..", "..", "..", "api", "src"))
+        if api_src not in sys.path:
+            sys.path.insert(0, api_src)
+
+        from nv_ingest_api.internal.primitives.nim.model_interface.yolox import (  # type: ignore
+            YoloxTableStructureModelInterface,
+            get_yolox_model_name,
+        )
+        from nv_ingest_api.util.nim import create_inference_client  # type: ignore
+    except Exception:
+        return "error", 0.0
+
+    model_interface = YoloxTableStructureModelInterface()
+    client = None
+    start = time.time()
+    try:
+        client = create_inference_client(
+            (endpoint, ""),
+            model_interface,
+            auth_token,
+            infer_protocol="grpc",
+            timeout=float(timeout),
+        )
+        model_name = get_yolox_model_name(endpoint, default_model_name="yolox_ensemble")
+
+        data = {"images": [image_np for _ in range(max(1, batch_size))]}
+        _ = client.infer(
+            data,
+            model_name=model_name,
+            max_batch_size=max(1, batch_size),
+            trace_info=None,
+            stage_name="concurrency_test",
+            input_names=["INPUT_IMAGES", "THRESHOLDS"],
+            dtypes=["BYTES", "FP32"],
+            output_names=["OUTPUT"],
+        )
+        elapsed = time.time() - start
+        if elapsed > timeout:
+            return "timeout", elapsed
+        return 200, elapsed
+    except Exception:
+        return "error", time.time() - start
+    finally:
+        try:
+            if client is not None:
+                client.close()
+        except Exception:
+            pass
